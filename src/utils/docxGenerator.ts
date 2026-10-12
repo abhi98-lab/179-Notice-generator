@@ -606,8 +606,7 @@ function replaceRequisitionPlaceholdersInXmlDom(
 
     if (!fullText.includes('{{')) continue;
 
-    // Detect if this paragraph or its parent table row is a Target Mobile / Points of Data Required row
-    // so that {{IO_MOBILE}} can NEVER be inserted into a CDR/CAF/SDR target-number field.
+    // Detect parent table row context
     let rowText = fullText;
     let parentEl: Node | null = p.parentNode;
     while (parentEl) {
@@ -618,9 +617,15 @@ function replaceRequisitionPlaceholdersInXmlDom(
       parentEl = parentEl.parentNode;
     }
 
+    const isRequisitioningOfficerContext =
+      /Requisitioning\s+Officer|Submitted\s+By|Investigating\s+Officer|I\.?O\.?\s+Name/i.test(
+        rowText
+      ) ||
+      (fullText.includes('{{IO_NAME}}') && !fullText.includes('{{MOBILE_NUMBER}}'));
+
     const isTargetNumberContext =
       /Points\s+of\s+Data\s+Required|Target\s+Number|Mobile\s+Number/i.test(rowText) &&
-      !/Submitted\s+By|Investigating\s+Officer|I\.?O\.?\s+Name/i.test(rowText);
+      !isRequisitioningOfficerContext;
 
     const matches: {
       key: RequisitionPlaceholderKey;
@@ -635,10 +640,16 @@ function replaceRequisitionPlaceholdersInXmlDom(
       const key = match[1] as RequisitionPlaceholderKey;
       let replacement = values[key] ?? '';
 
-      // Rule: NEVER include the IO's mobile number in the "Mobile Number", "Target Number",
-      // "Points of Data Required", or any CDR/CAF/SDR target-number field.
-      if (key === 'IO_MOBILE' && isTargetNumberContext) {
-        replacement = values.MOBILE_NUMBER ?? '';
+      // Rule: In every CDR/CAF/SDR requisition, the "Requisitioning Officer" box
+      // must contain exactly "SI Asif Ikbal of Cyber Crime PS" and no mobile number.
+      if (key === 'IO_NAME') {
+        replacement = 'SI Asif Ikbal of Cyber Crime PS';
+      } else if (key === 'IO_MOBILE') {
+        if (isTargetNumberContext) {
+          replacement = values.MOBILE_NUMBER ?? '';
+        } else {
+          replacement = '';
+        }
       }
 
       matches.push({
@@ -684,6 +695,36 @@ function replaceRequisitionPlaceholdersInXmlDom(
         range.start = updatedFullText.length;
         updatedFullText += range.text;
         range.end = updatedFullText.length;
+      }
+    }
+
+    // If this paragraph is in the Requisitioning Officer box and contained {{IO_NAME}} / {{IO_MOBILE}},
+    // ensure no residual mobile labels, brackets, or separators remain alongside "SI Asif Ikbal of Cyber Crime PS".
+    if (
+      matches.some((m) => m.key === 'IO_NAME' || (m.key === 'IO_MOBILE' && !isTargetNumberContext))
+    ) {
+      const combinedOfficerText = nodeRanges.map((r) => r.text).join('').trim();
+      if (combinedOfficerText.includes('SI Asif Ikbal of Cyber Crime PS')) {
+        const cleanedOfficerText = combinedOfficerText
+          .replace(/(\bMob(?:ile)?\.?\s*(?:No\.?)?\s*[:\-]?\s*)/gi, '')
+          .replace(/(\bPh(?:one)?\.?\s*(?:No\.?)?\s*[:\-]?\s*)/gi, '')
+          .replace(/\(\s*\)/g, '')
+          .replace(/[\s,\/\-]+$/g, '')
+          .trim();
+
+        const firstIdx = nodeRanges.findIndex((r) => r.text.length > 0);
+        const targetIdx = firstIdx >= 0 ? firstIdx : 0;
+        for (let idx = 0; idx < nodeRanges.length; idx++) {
+          nodeRanges[idx].text = idx === targetIdx ? cleanedOfficerText : '';
+        }
+      } else if (
+        matches.every((m) => m.key === 'IO_MOBILE') &&
+        !isTargetNumberContext
+      ) {
+        // Standalone {{IO_MOBILE}} line inside Requisitioning Officer box -> clear completely
+        for (let idx = 0; idx < nodeRanges.length; idx++) {
+          nodeRanges[idx].text = '';
+        }
       }
     }
 

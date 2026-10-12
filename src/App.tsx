@@ -122,14 +122,8 @@ export default function App() {
   const [reqFromDateIso, setReqFromDateIso] = useState('');
   const [reqToDateIso, setReqToDateIso] = useState('');
 
-  // Newly generated CDR/CAF/SDR Requisition DOCX file state for immediate Download / Open / Share
-  const [generatedRequisition, setGeneratedRequisition] = useState<{
-    blob: Blob;
-    file: File;
-    fileName: string;
-    url: string;
-  } | null>(null);
-  const [showShareFallback, setShowShareFallback] = useState(false);
+  // Simple downloading indication state
+  const [isDownloading, setIsDownloading] = useState(false);
 
   const trimmedPs = addresseePs.trim();
 
@@ -383,6 +377,7 @@ export default function App() {
     }
 
     try {
+      setIsDownloading(true);
       // Do not modify or rewrite the pasted address
       const placeholderValues: PlaceholderValues = {
         MEMO_NO: memoNo.trim(),
@@ -410,8 +405,12 @@ export default function App() {
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      URL.revokeObjectURL(url);
+      setTimeout(() => {
+        URL.revokeObjectURL(url);
+        setIsDownloading(false);
+      }, 800);
     } catch (err) {
+      setIsDownloading(false);
       const message =
         err instanceof Error
           ? err.message
@@ -432,17 +431,6 @@ export default function App() {
       setStatusMessage({
         type: 'error',
         text: 'Master template missing. Please upload the "NCMEC CDR / CAF / SDR" (.docx) master template first.',
-      });
-      return;
-    }
-
-    if (!ioName.trim()) {
-      setDraftIoName(ioName);
-      setDraftIoMobile(ioMobile);
-      setIsIoOpen(true);
-      setStatusMessage({
-        type: 'error',
-        text: 'IO Details missing. Please enter and save IO Name in "IO Details" at the top-right.',
       });
       return;
     }
@@ -492,6 +480,7 @@ export default function App() {
     }
 
     try {
+      setIsDownloading(true);
       const requisitionValues: RequisitionPlaceholderValues = {
         GDE_NO: reqGdeNo.trim(),
         GDE_DATE: formattedReqGdeDate,
@@ -500,42 +489,31 @@ export default function App() {
         MOBILE_NUMBER: exactTargetMobile,
         FROM_DATE: formattedFromDate,
         TO_DATE: formattedToDate,
-        IO_NAME: ioName.trim(),
-        IO_MOBILE: savedIoMobileTrimmed,
+        IO_NAME: 'SI Asif Ikbal of Cyber Crime PS',
+        IO_MOBILE: '',
       };
 
       const blob = generateRequisitionDocx(cdrMasterTemplate.buffer, requisitionValues);
 
-      const safeMobile = (reqMobileNumber.trim() || 'Requisition').replace(
+      const safeMobile = (exactTargetMobile || 'Requisition').replace(
         /[^a-zA-Z0-9_-]+/g,
         '_'
       );
       const downloadName = `NCMEC_CDR_CAF_SDR_${safeMobile}.docx`;
-      const docxMimeType =
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
-      if (generatedRequisition?.url) {
-        URL.revokeObjectURL(generatedRequisition.url);
-      }
-
-      const file = new File([blob], downloadName, { type: docxMimeType });
       const url = URL.createObjectURL(blob);
-
-      setGeneratedRequisition({
-        blob,
-        file,
-        fileName: downloadName,
-        url,
-      });
-      setShowShareFallback(true);
-
       const link = document.createElement('a');
       link.href = url;
       link.download = downloadName;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+      setTimeout(() => {
+        URL.revokeObjectURL(url);
+        setIsDownloading(false);
+      }, 800);
     } catch (err) {
+      setIsDownloading(false);
       const message =
         err instanceof Error
           ? err.message
@@ -545,89 +523,6 @@ export default function App() {
         text: message,
       });
     }
-  };
-
-  const handleDownloadGeneratedRequisition = () => {
-    if (!generatedRequisition) return;
-    const link = document.createElement('a');
-    link.href = generatedRequisition.url;
-    link.download = generatedRequisition.fileName;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  const handleShareOrOpenWithRequisition = async () => {
-    if (!generatedRequisition) return;
-
-    if (
-      typeof navigator !== 'undefined' &&
-      typeof navigator.share === 'function' &&
-      typeof navigator.canShare === 'function' &&
-      navigator.canShare({ files: [generatedRequisition.file] })
-    ) {
-      try {
-        await navigator.share({
-          files: [generatedRequisition.file],
-          title: generatedRequisition.fileName,
-        });
-        return;
-      } catch (err) {
-        if (err instanceof Error && err.name === 'AbortError') {
-          return;
-        }
-      }
-    }
-
-    // Fallback if Web Share API is unavailable or restricted
-    const link = document.createElement('a');
-    link.href = generatedRequisition.url;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  const handleOpenGeneratedRequisition = async () => {
-    if (!generatedRequisition) return;
-
-    const isMobileDevice = /android|iphone|ipad|ipod/i.test(
-      typeof navigator !== 'undefined' ? navigator.userAgent : ''
-    );
-
-    // On mobile or where Web Share with files is supported, invoke the native device
-    // open/share sheet so the user can open directly in Word/Docs without visiting Downloads
-    if (
-      isMobileDevice &&
-      typeof navigator !== 'undefined' &&
-      typeof navigator.share === 'function' &&
-      typeof navigator.canShare === 'function' &&
-      navigator.canShare({ files: [generatedRequisition.file] })
-    ) {
-      try {
-        await navigator.share({
-          files: [generatedRequisition.file],
-          title: generatedRequisition.fileName,
-        });
-        return;
-      } catch (err) {
-        if (err instanceof Error && err.name === 'AbortError') {
-          return;
-        }
-        setShowShareFallback(true);
-      }
-    }
-
-    // Try opening via ms-word protocol or direct object URL navigation
-    setShowShareFallback(true);
-    const link = document.createElement('a');
-    link.href = generatedRequisition.url;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
   };
 
   const inputClassName =
@@ -974,9 +869,10 @@ export default function App() {
               <div className="pt-2">
                 <button
                   type="submit"
-                  className="w-full sm:w-auto px-6 py-2.5 text-sm font-medium text-white bg-[#0F172A] rounded hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-[#0F172A] focus:ring-offset-2 cursor-pointer"
+                  disabled={isDownloading}
+                  className="w-full sm:w-auto px-6 py-2.5 text-sm font-medium text-white bg-[#0F172A] rounded hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-[#0F172A] focus:ring-offset-2 cursor-pointer disabled:opacity-70"
                 >
-                  Generate Notice
+                  {isDownloading ? 'Downloading...' : 'Generate Notice'}
                 </button>
               </div>
             </form>
@@ -1091,44 +987,15 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Primary Button & Post-Generation File Actions */}
-              <div className="pt-2 flex flex-wrap items-center gap-3">
+              {/* Primary Button */}
+              <div className="pt-2">
                 <button
                   type="submit"
-                  className="w-full sm:w-auto px-6 py-2.5 text-sm font-medium text-white bg-[#0F172A] rounded hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-[#0F172A] focus:ring-offset-2 cursor-pointer"
+                  disabled={isDownloading}
+                  className="w-full sm:w-auto px-6 py-2.5 text-sm font-medium text-white bg-[#0F172A] rounded hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-[#0F172A] focus:ring-offset-2 cursor-pointer disabled:opacity-70"
                 >
-                  Generate Requisition
+                  {isDownloading ? 'Downloading...' : 'Download DOCX'}
                 </button>
-
-                {generatedRequisition && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={handleDownloadGeneratedRequisition}
-                      className="w-full sm:w-auto px-4 py-2.5 text-sm font-medium text-[#0F172A] bg-white border border-slate-300 rounded hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0F172A] focus:ring-offset-2 cursor-pointer whitespace-nowrap"
-                    >
-                      Download DOCX
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={handleOpenGeneratedRequisition}
-                      className="w-full sm:w-auto px-4 py-2.5 text-sm font-medium text-[#0F172A] bg-white border border-slate-300 rounded hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0F172A] focus:ring-offset-2 cursor-pointer whitespace-nowrap"
-                    >
-                      Open File
-                    </button>
-
-                    {showShareFallback && (
-                      <button
-                        type="button"
-                        onClick={handleShareOrOpenWithRequisition}
-                        className="w-full sm:w-auto px-4 py-2.5 text-sm font-medium text-[#0F172A] bg-white border border-slate-300 rounded hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0F172A] focus:ring-offset-2 cursor-pointer whitespace-nowrap"
-                      >
-                        Share / Open With
-                      </button>
-                    )}
-                  </>
-                )}
               </div>
             </form>
           )}
