@@ -122,6 +122,15 @@ export default function App() {
   const [reqFromDateIso, setReqFromDateIso] = useState('');
   const [reqToDateIso, setReqToDateIso] = useState('');
 
+  // Newly generated CDR/CAF/SDR Requisition DOCX file state for immediate Download / Open / Share
+  const [generatedRequisition, setGeneratedRequisition] = useState<{
+    blob: Blob;
+    file: File;
+    fileName: string;
+    url: string;
+  } | null>(null);
+  const [showShareFallback, setShowShareFallback] = useState(false);
+
   const trimmedPs = addresseePs.trim();
 
   useEffect(() => {
@@ -427,13 +436,13 @@ export default function App() {
       return;
     }
 
-    if (!ioName.trim() || !ioMobile.trim()) {
+    if (!ioName.trim()) {
       setDraftIoName(ioName);
       setDraftIoMobile(ioMobile);
       setIsIoOpen(true);
       setStatusMessage({
         type: 'error',
-        text: 'IO Details missing. Please enter and save IO Name and IO Mobile Number in "IO Details" at the top-right.',
+        text: 'IO Details missing. Please enter and save IO Name in "IO Details" at the top-right.',
       });
       return;
     }
@@ -442,12 +451,15 @@ export default function App() {
     const formattedFromDate = formatNoticeDate(reqFromDateIso);
     const formattedToDate = formatNoticeDate(reqToDateIso);
 
+    // Preserve target mobile number(s) exactly as entered (do NOT add "91", "+91", or any country code)
+    const exactTargetMobile = reqMobileNumber.trim();
+
     const missingFields: string[] = [];
     if (!reqGdeNo.trim()) missingFields.push('GDE No.');
     if (!formattedReqGdeDate) missingFields.push('GDE Date');
     if (!reqNcmecTiplineNo.trim()) missingFields.push('NCMEC Tipline Report No.');
     if (!requisitionType) missingFields.push('Requisition Type');
-    if (!reqMobileNumber.trim()) missingFields.push('Mobile Number');
+    if (!exactTargetMobile) missingFields.push('Mobile Number');
     if (!formattedFromDate) missingFields.push('From Date');
     if (!formattedToDate) missingFields.push('To Date');
 
@@ -459,17 +471,37 @@ export default function App() {
       return;
     }
 
+    // Rule: NEVER include the IO's mobile number in the "Mobile Number", "Target Number",
+    // "Points of Data Required", or any CDR/CAF/SDR target-number field.
+    const savedIoMobileTrimmed = ioMobile.trim();
+    if (savedIoMobileTrimmed) {
+      const targetTokens = exactTargetMobile
+        .split(/[\s,;\/]+/)
+        .map((t) => t.trim())
+        .filter(Boolean);
+      if (
+        exactTargetMobile === savedIoMobileTrimmed ||
+        targetTokens.includes(savedIoMobileTrimmed)
+      ) {
+        setStatusMessage({
+          type: 'error',
+          text: 'The IO Mobile Number must never be entered as a CDR/CAF/SDR target Mobile Number. Please enter only the suspect/target mobile number.',
+        });
+        return;
+      }
+    }
+
     try {
       const requisitionValues: RequisitionPlaceholderValues = {
         GDE_NO: reqGdeNo.trim(),
         GDE_DATE: formattedReqGdeDate,
         NCMEC_TIPLINE_NO: reqNcmecTiplineNo.trim(),
         REQUISITION_TYPE: requisitionType,
-        MOBILE_NUMBER: reqMobileNumber.trim(),
+        MOBILE_NUMBER: exactTargetMobile,
         FROM_DATE: formattedFromDate,
         TO_DATE: formattedToDate,
         IO_NAME: ioName.trim(),
-        IO_MOBILE: ioMobile.trim(),
+        IO_MOBILE: savedIoMobileTrimmed,
       };
 
       const blob = generateRequisitionDocx(cdrMasterTemplate.buffer, requisitionValues);
@@ -479,15 +511,30 @@ export default function App() {
         '_'
       );
       const downloadName = `NCMEC_CDR_CAF_SDR_${safeMobile}.docx`;
+      const docxMimeType =
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
+      if (generatedRequisition?.url) {
+        URL.revokeObjectURL(generatedRequisition.url);
+      }
+
+      const file = new File([blob], downloadName, { type: docxMimeType });
       const url = URL.createObjectURL(blob);
+
+      setGeneratedRequisition({
+        blob,
+        file,
+        fileName: downloadName,
+        url,
+      });
+      setShowShareFallback(true);
+
       const link = document.createElement('a');
       link.href = url;
       link.download = downloadName;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      URL.revokeObjectURL(url);
     } catch (err) {
       const message =
         err instanceof Error
@@ -498,6 +545,89 @@ export default function App() {
         text: message,
       });
     }
+  };
+
+  const handleDownloadGeneratedRequisition = () => {
+    if (!generatedRequisition) return;
+    const link = document.createElement('a');
+    link.href = generatedRequisition.url;
+    link.download = generatedRequisition.fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleShareOrOpenWithRequisition = async () => {
+    if (!generatedRequisition) return;
+
+    if (
+      typeof navigator !== 'undefined' &&
+      typeof navigator.share === 'function' &&
+      typeof navigator.canShare === 'function' &&
+      navigator.canShare({ files: [generatedRequisition.file] })
+    ) {
+      try {
+        await navigator.share({
+          files: [generatedRequisition.file],
+          title: generatedRequisition.fileName,
+        });
+        return;
+      } catch (err) {
+        if (err instanceof Error && err.name === 'AbortError') {
+          return;
+        }
+      }
+    }
+
+    // Fallback if Web Share API is unavailable or restricted
+    const link = document.createElement('a');
+    link.href = generatedRequisition.url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleOpenGeneratedRequisition = async () => {
+    if (!generatedRequisition) return;
+
+    const isMobileDevice = /android|iphone|ipad|ipod/i.test(
+      typeof navigator !== 'undefined' ? navigator.userAgent : ''
+    );
+
+    // On mobile or where Web Share with files is supported, invoke the native device
+    // open/share sheet so the user can open directly in Word/Docs without visiting Downloads
+    if (
+      isMobileDevice &&
+      typeof navigator !== 'undefined' &&
+      typeof navigator.share === 'function' &&
+      typeof navigator.canShare === 'function' &&
+      navigator.canShare({ files: [generatedRequisition.file] })
+    ) {
+      try {
+        await navigator.share({
+          files: [generatedRequisition.file],
+          title: generatedRequisition.fileName,
+        });
+        return;
+      } catch (err) {
+        if (err instanceof Error && err.name === 'AbortError') {
+          return;
+        }
+        setShowShareFallback(true);
+      }
+    }
+
+    // Try opening via ms-word protocol or direct object URL navigation
+    setShowShareFallback(true);
+    const link = document.createElement('a');
+    link.href = generatedRequisition.url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const inputClassName =
@@ -961,14 +1091,44 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Primary Button */}
-              <div className="pt-2">
+              {/* Primary Button & Post-Generation File Actions */}
+              <div className="pt-2 flex flex-wrap items-center gap-3">
                 <button
                   type="submit"
                   className="w-full sm:w-auto px-6 py-2.5 text-sm font-medium text-white bg-[#0F172A] rounded hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-[#0F172A] focus:ring-offset-2 cursor-pointer"
                 >
                   Generate Requisition
                 </button>
+
+                {generatedRequisition && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleDownloadGeneratedRequisition}
+                      className="w-full sm:w-auto px-4 py-2.5 text-sm font-medium text-[#0F172A] bg-white border border-slate-300 rounded hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0F172A] focus:ring-offset-2 cursor-pointer whitespace-nowrap"
+                    >
+                      Download DOCX
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleOpenGeneratedRequisition}
+                      className="w-full sm:w-auto px-4 py-2.5 text-sm font-medium text-[#0F172A] bg-white border border-slate-300 rounded hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0F172A] focus:ring-offset-2 cursor-pointer whitespace-nowrap"
+                    >
+                      Open File
+                    </button>
+
+                    {showShareFallback && (
+                      <button
+                        type="button"
+                        onClick={handleShareOrOpenWithRequisition}
+                        className="w-full sm:w-auto px-4 py-2.5 text-sm font-medium text-[#0F172A] bg-white border border-slate-300 rounded hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-[#0F172A] focus:ring-offset-2 cursor-pointer whitespace-nowrap"
+                      >
+                        Share / Open With
+                      </button>
+                    )}
+                  </>
+                )}
               </div>
             </form>
           )}

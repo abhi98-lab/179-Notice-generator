@@ -606,6 +606,22 @@ function replaceRequisitionPlaceholdersInXmlDom(
 
     if (!fullText.includes('{{')) continue;
 
+    // Detect if this paragraph or its parent table row is a Target Mobile / Points of Data Required row
+    // so that {{IO_MOBILE}} can NEVER be inserted into a CDR/CAF/SDR target-number field.
+    let rowText = fullText;
+    let parentEl: Node | null = p.parentNode;
+    while (parentEl) {
+      if (parentEl.nodeType === 1 && (parentEl as Element).tagName === 'w:tr') {
+        rowText = (parentEl as Element).textContent || fullText;
+        break;
+      }
+      parentEl = parentEl.parentNode;
+    }
+
+    const isTargetNumberContext =
+      /Points\s+of\s+Data\s+Required|Target\s+Number|Mobile\s+Number/i.test(rowText) &&
+      !/Submitted\s+By|Investigating\s+Officer|I\.?O\.?\s+Name/i.test(rowText);
+
     const matches: {
       key: RequisitionPlaceholderKey;
       start: number;
@@ -617,7 +633,14 @@ function replaceRequisitionPlaceholdersInXmlDom(
 
     while ((match = REQUISITION_PLACEHOLDER_REGEX.exec(fullText)) !== null) {
       const key = match[1] as RequisitionPlaceholderKey;
-      const replacement = values[key] ?? '';
+      let replacement = values[key] ?? '';
+
+      // Rule: NEVER include the IO's mobile number in the "Mobile Number", "Target Number",
+      // "Points of Data Required", or any CDR/CAF/SDR target-number field.
+      if (key === 'IO_MOBILE' && isTargetNumberContext) {
+        replacement = values.MOBILE_NUMBER ?? '';
+      }
+
       matches.push({
         key,
         start: match.index,
