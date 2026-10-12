@@ -5,13 +5,30 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  getCdrMasterTemplate,
   getIoDetails,
   getMasterTemplate,
+  saveCdrMasterTemplate,
   saveIoDetails,
   saveMasterTemplate,
   StoredTemplate,
 } from './utils/db';
-import { generateNoticeDocx, PlaceholderValues } from './utils/docxGenerator';
+import {
+  generateNoticeDocx,
+  generateRequisitionDocx,
+  PlaceholderValues,
+  RequisitionPlaceholderValues,
+} from './utils/docxGenerator';
+
+const REQUISITION_TYPES = [
+  'CDR',
+  'CAF',
+  'SDR',
+  'CDR + CAF',
+  'CDR + SDR',
+  'CAF + SDR',
+  'CDR + CAF + SDR',
+] as const;
 
 const BIRBHUM_POLICE_STATIONS = [
   'Suri PS',
@@ -52,10 +69,14 @@ function formatNoticeDate(isoDate: string): string {
 
 export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const cdrFileInputRef = useRef<HTMLInputElement | null>(null);
   const ioPopoverRef = useRef<HTMLDivElement | null>(null);
   const masterPopoverRef = useRef<HTMLDivElement | null>(null);
 
+  const [activeTab, setActiveTab] = useState<'notice' | 'requisition'>('notice');
+
   const [masterTemplate, setMasterTemplate] = useState<StoredTemplate | null>(null);
+  const [cdrMasterTemplate, setCdrMasterTemplate] = useState<StoredTemplate | null>(null);
   const [statusMessage, setStatusMessage] = useState<{
     type: 'error' | 'info';
     text: string;
@@ -91,6 +112,16 @@ export default function App() {
   const [addresseePs, setAddresseePs] = useState('');
   const [authority, setAuthority] = useState<'O/C' | 'I/C'>('I/C');
 
+  // CDR / CAF / SDR Requisition Form Fields
+  const [reqGdeNo, setReqGdeNo] = useState('');
+  const [reqGdeDateIso, setReqGdeDateIso] = useState('');
+  const [reqNcmecTiplineNo, setReqNcmecTiplineNo] = useState('');
+  const [requisitionType, setRequisitionType] =
+    useState<(typeof REQUISITION_TYPES)[number]>('CDR + CAF + SDR');
+  const [reqMobileNumber, setReqMobileNumber] = useState('');
+  const [reqFromDateIso, setReqFromDateIso] = useState('');
+  const [reqToDateIso, setReqToDateIso] = useState('');
+
   const trimmedPs = addresseePs.trim();
 
   useEffect(() => {
@@ -105,6 +136,16 @@ export default function App() {
           type: 'error',
           text: 'Could not read stored master template from local database.',
         });
+      });
+
+    getCdrMasterTemplate()
+      .then((storedCdr) => {
+        if (storedCdr) {
+          setCdrMasterTemplate(storedCdr);
+        }
+      })
+      .catch(() => {
+        // Ignore read error on initial load
       });
 
     getIoDetails().then((savedIo) => {
@@ -255,6 +296,37 @@ export default function App() {
     }
   };
 
+  const handleCdrMasterUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.name.toLowerCase().endsWith('.docx')) {
+      setStatusMessage({
+        type: 'error',
+        text: 'Please upload a valid .docx file for the NCMEC CDR / CAF / SDR master template.',
+      });
+      e.target.value = '';
+      return;
+    }
+
+    try {
+      const saved = await saveCdrMasterTemplate(file);
+      setCdrMasterTemplate(saved);
+      setIsMasterOpen(false);
+      setStatusMessage({
+        type: 'info',
+        text: `NCMEC CDR / CAF / SDR master ("${saved.fileName}") saved locally.`,
+      });
+    } catch {
+      setStatusMessage({
+        type: 'error',
+        text: 'Failed to save NCMEC CDR / CAF / SDR master template to IndexedDB.',
+      });
+    } finally {
+      e.target.value = '';
+    }
+  };
+
   const handleGenerateNotice = (e: React.FormEvent) => {
     e.preventDefault();
     setStatusMessage(null);
@@ -335,6 +407,92 @@ export default function App() {
         err instanceof Error
           ? err.message
           : 'Unable to generate notice from the uploaded DOCX master.';
+      setStatusMessage({
+        type: 'error',
+        text: message,
+      });
+    }
+  };
+
+  const handleGenerateRequisition = (e: React.FormEvent) => {
+    e.preventDefault();
+    setStatusMessage(null);
+
+    if (!cdrMasterTemplate) {
+      setIsMasterOpen(true);
+      setStatusMessage({
+        type: 'error',
+        text: 'Master template missing. Please upload the "NCMEC CDR / CAF / SDR" (.docx) master template first.',
+      });
+      return;
+    }
+
+    if (!ioName.trim() || !ioMobile.trim()) {
+      setDraftIoName(ioName);
+      setDraftIoMobile(ioMobile);
+      setIsIoOpen(true);
+      setStatusMessage({
+        type: 'error',
+        text: 'IO Details missing. Please enter and save IO Name and IO Mobile Number in "IO Details" at the top-right.',
+      });
+      return;
+    }
+
+    const formattedReqGdeDate = formatNoticeDate(reqGdeDateIso);
+    const formattedFromDate = formatNoticeDate(reqFromDateIso);
+    const formattedToDate = formatNoticeDate(reqToDateIso);
+
+    const missingFields: string[] = [];
+    if (!reqGdeNo.trim()) missingFields.push('GDE No.');
+    if (!formattedReqGdeDate) missingFields.push('GDE Date');
+    if (!reqNcmecTiplineNo.trim()) missingFields.push('NCMEC Tipline Report No.');
+    if (!requisitionType) missingFields.push('Requisition Type');
+    if (!reqMobileNumber.trim()) missingFields.push('Mobile Number');
+    if (!formattedFromDate) missingFields.push('From Date');
+    if (!formattedToDate) missingFields.push('To Date');
+
+    if (missingFields.length > 0) {
+      setStatusMessage({
+        type: 'error',
+        text: `Please fill all required fields: ${missingFields.join(', ')}.`,
+      });
+      return;
+    }
+
+    try {
+      const requisitionValues: RequisitionPlaceholderValues = {
+        GDE_NO: reqGdeNo.trim(),
+        GDE_DATE: formattedReqGdeDate,
+        NCMEC_TIPLINE_NO: reqNcmecTiplineNo.trim(),
+        REQUISITION_TYPE: requisitionType,
+        MOBILE_NUMBER: reqMobileNumber.trim(),
+        FROM_DATE: formattedFromDate,
+        TO_DATE: formattedToDate,
+        IO_NAME: ioName.trim(),
+        IO_MOBILE: ioMobile.trim(),
+      };
+
+      const blob = generateRequisitionDocx(cdrMasterTemplate.buffer, requisitionValues);
+
+      const safeMobile = (reqMobileNumber.trim() || 'Requisition').replace(
+        /[^a-zA-Z0-9_-]+/g,
+        '_'
+      );
+      const downloadName = `NCMEC_CDR_CAF_SDR_${safeMobile}.docx`;
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = downloadName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Unable to generate requisition from the uploaded DOCX master.';
       setStatusMessage({
         type: 'error',
         text: message,
@@ -433,6 +591,13 @@ export default function App() {
                 onChange={handleMasterUpload}
                 className="hidden"
               />
+              <input
+                ref={cdrFileInputRef}
+                type="file"
+                accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                onChange={handleCdrMasterUpload}
+                className="hidden"
+              />
               <button
                 type="button"
                 onClick={handleToggleMasterPopover}
@@ -442,23 +607,46 @@ export default function App() {
               </button>
 
               {isMasterOpen && (
-                <div className="absolute right-0 mt-2 w-72 bg-white border border-slate-200 rounded-md p-4 z-20 space-y-3">
-                  <div>
-                    <div className="text-xs font-semibold text-[#0F172A]">
-                      179 BNSS NCMEC Notice
+                <div className="absolute right-0 mt-2 w-72 bg-white border border-slate-200 rounded-md p-4 z-20 space-y-4">
+                  {/* Slot 1: 179 BNSS NCMEC Notice */}
+                  <div className="space-y-2.5">
+                    <div>
+                      <div className="text-xs font-semibold text-[#0F172A]">
+                        179 BNSS NCMEC Notice
+                      </div>
+                      <div className="text-xs text-slate-600 mt-0.5 truncate">
+                        {masterTemplate ? masterTemplate.fileName : 'No master uploaded'}
+                      </div>
                     </div>
-                    <div className="text-xs text-slate-600 mt-1 truncate">
-                      {masterTemplate ? masterTemplate.fileName : 'No master uploaded'}
-                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="w-full px-3.5 py-1.5 text-xs font-medium text-white bg-[#0F172A] rounded hover:bg-slate-800 focus:outline-none focus:ring-1 focus:ring-[#0F172A] cursor-pointer"
+                    >
+                      {masterTemplate ? 'Replace Master (.docx)' : 'Upload Master (.docx)'}
+                    </button>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="w-full px-3.5 py-1.5 text-xs font-medium text-white bg-[#0F172A] rounded hover:bg-slate-800 focus:outline-none focus:ring-1 focus:ring-[#0F172A] cursor-pointer"
-                  >
-                    {masterTemplate ? 'Replace Master (.docx)' : 'Upload Master (.docx)'}
-                  </button>
+                  {/* Slot 2: NCMEC CDR / CAF / SDR */}
+                  <div className="pt-3 border-t border-slate-200 space-y-2.5">
+                    <div>
+                      <div className="text-xs font-semibold text-[#0F172A]">
+                        NCMEC CDR / CAF / SDR
+                      </div>
+                      <div className="text-xs text-slate-600 mt-0.5 truncate">
+                        {cdrMasterTemplate ? cdrMasterTemplate.fileName : 'No master uploaded'}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => cdrFileInputRef.current?.click()}
+                      className="w-full px-3.5 py-1.5 text-xs font-medium text-white bg-[#0F172A] rounded hover:bg-slate-800 focus:outline-none focus:ring-1 focus:ring-[#0F172A] cursor-pointer"
+                    >
+                      {cdrMasterTemplate ? 'Replace Master (.docx)' : 'Upload Master (.docx)'}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -469,6 +657,38 @@ export default function App() {
       {/* Main Content */}
       <main className="flex-1 w-full px-4 sm:px-6 py-8 sm:py-10">
         <div className="max-w-[850px] mx-auto bg-white border border-slate-200 rounded-md p-6 sm:p-8">
+          {/* Mode Selector */}
+          <div className="flex items-center gap-2 pb-5 mb-6 border-b border-slate-200">
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('notice');
+                setStatusMessage(null);
+              }}
+              className={`px-3.5 py-1.5 text-xs font-medium rounded border cursor-pointer whitespace-nowrap ${
+                activeTab === 'notice'
+                  ? 'bg-[#0F172A] text-white border-[#0F172A]'
+                  : 'bg-white text-[#0F172A] border-slate-300 hover:bg-slate-50'
+              }`}
+            >
+              179 Notice Generator
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('requisition');
+                setStatusMessage(null);
+              }}
+              className={`px-3.5 py-1.5 text-xs font-medium rounded border cursor-pointer whitespace-nowrap ${
+                activeTab === 'requisition'
+                  ? 'bg-[#0F172A] text-white border-[#0F172A]'
+                  : 'bg-white text-[#0F172A] border-slate-300 hover:bg-slate-50'
+              }`}
+            >
+              CDR / CAF / SDR Generator
+            </button>
+          </div>
+
           {statusMessage && (
             <div
               role="status"
@@ -482,153 +702,276 @@ export default function App() {
             </div>
           )}
 
-          <form onSubmit={handleGenerateNotice} className="space-y-5">
-            {/* Row 1: Memo No. & Notice Date */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {activeTab === 'notice' ? (
+            <form onSubmit={handleGenerateNotice} className="space-y-5">
+              {/* Row 1: Memo No. & Notice Date */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="memoNo" className={labelClassName}>
+                    Memo No.
+                  </label>
+                  <input
+                    id="memoNo"
+                    type="text"
+                    value={memoNo}
+                    onChange={(e) => setMemoNo(e.target.value)}
+                    className={`${inputClassName} tabular-nums`}
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="noticeDate" className={labelClassName}>
+                    Notice Date
+                  </label>
+                  <input
+                    id="noticeDate"
+                    type="date"
+                    value={noticeDateIso}
+                    onChange={(e) => setNoticeDateIso(e.target.value)}
+                    className={`${inputClassName} tabular-nums`}
+                  />
+                </div>
+              </div>
+
+              {/* Row 2: GDE No., GDE Date, NCMEC Tipline Report No. */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label htmlFor="gdeNo" className={labelClassName}>
+                    GDE No.
+                  </label>
+                  <input
+                    id="gdeNo"
+                    type="text"
+                    value={gdeNo}
+                    onChange={(e) => setGdeNo(e.target.value)}
+                    className={`${inputClassName} tabular-nums`}
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="gdeDate" className={labelClassName}>
+                    GDE Date
+                  </label>
+                  <input
+                    id="gdeDate"
+                    type="date"
+                    value={gdeDateIso}
+                    onChange={(e) => setGdeDateIso(e.target.value)}
+                    className={`${inputClassName} tabular-nums`}
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="ncmecTiplineNo" className={labelClassName}>
+                    NCMEC Tipline Report No.
+                  </label>
+                  <input
+                    id="ncmecTiplineNo"
+                    type="text"
+                    value={ncmecTiplineNo}
+                    onChange={(e) => setNcmecTiplineNo(e.target.value)}
+                    className={`${inputClassName} tabular-nums`}
+                  />
+                </div>
+              </div>
+
+              {/* Row 3: Addressee Name */}
               <div>
-                <label htmlFor="memoNo" className={labelClassName}>
-                  Memo No.
+                <label htmlFor="addresseeName" className={labelClassName}>
+                  Addressee Name
                 </label>
                 <input
-                  id="memoNo"
+                  id="addresseeName"
                   type="text"
-                  value={memoNo}
-                  onChange={(e) => setMemoNo(e.target.value)}
-                  className={`${inputClassName} tabular-nums`}
-                />
-              </div>
-
-              <div>
-                <label htmlFor="noticeDate" className={labelClassName}>
-                  Notice Date
-                </label>
-                <input
-                  id="noticeDate"
-                  type="date"
-                  value={noticeDateIso}
-                  onChange={(e) => setNoticeDateIso(e.target.value)}
-                  className={`${inputClassName} tabular-nums`}
-                />
-              </div>
-            </div>
-
-            {/* Row 2: GDE No., GDE Date, NCMEC Tipline Report No. */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div>
-                <label htmlFor="gdeNo" className={labelClassName}>
-                  GDE No.
-                </label>
-                <input
-                  id="gdeNo"
-                  type="text"
-                  value={gdeNo}
-                  onChange={(e) => setGdeNo(e.target.value)}
-                  className={`${inputClassName} tabular-nums`}
-                />
-              </div>
-
-              <div>
-                <label htmlFor="gdeDate" className={labelClassName}>
-                  GDE Date
-                </label>
-                <input
-                  id="gdeDate"
-                  type="date"
-                  value={gdeDateIso}
-                  onChange={(e) => setGdeDateIso(e.target.value)}
-                  className={`${inputClassName} tabular-nums`}
-                />
-              </div>
-
-              <div>
-                <label htmlFor="ncmecTiplineNo" className={labelClassName}>
-                  NCMEC Tipline Report No.
-                </label>
-                <input
-                  id="ncmecTiplineNo"
-                  type="text"
-                  value={ncmecTiplineNo}
-                  onChange={(e) => setNcmecTiplineNo(e.target.value)}
-                  className={`${inputClassName} tabular-nums`}
-                />
-              </div>
-            </div>
-
-            {/* Row 3: Addressee Name */}
-            <div>
-              <label htmlFor="addresseeName" className={labelClassName}>
-                Addressee Name
-              </label>
-              <input
-                id="addresseeName"
-                type="text"
-                value={addresseeName}
-                onChange={(e) => setAddresseeName(e.target.value)}
-                className={inputClassName}
-              />
-            </div>
-
-            {/* Row 4: Full Address */}
-            <div>
-              <label htmlFor="fullAddress" className={labelClassName}>
-                Full Address
-              </label>
-              <textarea
-                id="fullAddress"
-                rows={4}
-                value={fullAddress}
-                onChange={(e) => setFullAddress(e.target.value)}
-                className="w-full p-3 text-sm text-[#0F172A] bg-white border border-slate-300 rounded focus:outline-none focus:border-[#0F172A] focus:ring-1 focus:ring-[#0F172A]"
-              />
-            </div>
-
-            {/* Row 5: Addressee PS & Authority */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div className="sm:col-span-2">
-                <label htmlFor="addresseePs" className={labelClassName}>
-                  Addressee PS
-                </label>
-                <input
-                  id="addresseePs"
-                  type="text"
-                  list="birbhum-ps-options"
-                  value={addresseePs}
-                  onChange={(e) => setAddresseePs(e.target.value)}
+                  value={addresseeName}
+                  onChange={(e) => setAddresseeName(e.target.value)}
                   className={inputClassName}
                 />
-                <datalist id="birbhum-ps-options">
-                  {BIRBHUM_POLICE_STATIONS.map((ps) => (
-                    <option key={ps} value={ps} />
-                  ))}
-                </datalist>
               </div>
 
+              {/* Row 4: Full Address */}
               <div>
-                <label htmlFor="authority" className={labelClassName}>
-                  Authority
+                <label htmlFor="fullAddress" className={labelClassName}>
+                  Full Address
                 </label>
-                <select
-                  id="authority"
-                  value={authority}
-                  onChange={(e) => setAuthority(e.target.value as 'O/C' | 'I/C')}
-                  className={inputClassName}
+                <textarea
+                  id="fullAddress"
+                  rows={4}
+                  value={fullAddress}
+                  onChange={(e) => setFullAddress(e.target.value)}
+                  className="w-full p-3 text-sm text-[#0F172A] bg-white border border-slate-300 rounded focus:outline-none focus:border-[#0F172A] focus:ring-1 focus:ring-[#0F172A]"
+                />
+              </div>
+
+              {/* Row 5: Addressee PS & Authority */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="sm:col-span-2">
+                  <label htmlFor="addresseePs" className={labelClassName}>
+                    Addressee PS
+                  </label>
+                  <input
+                    id="addresseePs"
+                    type="text"
+                    list="birbhum-ps-options"
+                    value={addresseePs}
+                    onChange={(e) => setAddresseePs(e.target.value)}
+                    className={inputClassName}
+                  />
+                  <datalist id="birbhum-ps-options">
+                    {BIRBHUM_POLICE_STATIONS.map((ps) => (
+                      <option key={ps} value={ps} />
+                    ))}
+                  </datalist>
+                </div>
+
+                <div>
+                  <label htmlFor="authority" className={labelClassName}>
+                    Authority
+                  </label>
+                  <select
+                    id="authority"
+                    value={authority}
+                    onChange={(e) => setAuthority(e.target.value as 'O/C' | 'I/C')}
+                    className={inputClassName}
+                  >
+                    <option value="O/C">O/C</option>
+                    <option value="I/C">I/C</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Primary Button */}
+              <div className="pt-2">
+                <button
+                  type="submit"
+                  className="w-full sm:w-auto px-6 py-2.5 text-sm font-medium text-white bg-[#0F172A] rounded hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-[#0F172A] focus:ring-offset-2 cursor-pointer"
                 >
-                  <option value="O/C">O/C</option>
-                  <option value="I/C">I/C</option>
-                </select>
+                  Generate Notice
+                </button>
               </div>
-            </div>
+            </form>
+          ) : (
+            <form onSubmit={handleGenerateRequisition} className="space-y-5">
+              {/* Row 1: GDE No., GDE Date, NCMEC Tipline Report No. */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label htmlFor="reqGdeNo" className={labelClassName}>
+                    GDE No.
+                  </label>
+                  <input
+                    id="reqGdeNo"
+                    type="text"
+                    value={reqGdeNo}
+                    onChange={(e) => setReqGdeNo(e.target.value)}
+                    className={`${inputClassName} tabular-nums`}
+                  />
+                </div>
 
-            {/* Primary Button */}
-            <div className="pt-2">
-              <button
-                type="submit"
-                className="w-full sm:w-auto px-6 py-2.5 text-sm font-medium text-white bg-[#0F172A] rounded hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-[#0F172A] focus:ring-offset-2 cursor-pointer"
-              >
-                Generate Notice
-              </button>
-            </div>
-          </form>
+                <div>
+                  <label htmlFor="reqGdeDate" className={labelClassName}>
+                    GDE Date
+                  </label>
+                  <input
+                    id="reqGdeDate"
+                    type="date"
+                    value={reqGdeDateIso}
+                    onChange={(e) => setReqGdeDateIso(e.target.value)}
+                    className={`${inputClassName} tabular-nums`}
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="reqNcmecTiplineNo" className={labelClassName}>
+                    NCMEC Tipline Report No.
+                  </label>
+                  <input
+                    id="reqNcmecTiplineNo"
+                    type="text"
+                    value={reqNcmecTiplineNo}
+                    onChange={(e) => setReqNcmecTiplineNo(e.target.value)}
+                    className={`${inputClassName} tabular-nums`}
+                  />
+                </div>
+              </div>
+
+              {/* Row 2: Requisition Type & Mobile Number */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="requisitionType" className={labelClassName}>
+                    Requisition Type
+                  </label>
+                  <select
+                    id="requisitionType"
+                    value={requisitionType}
+                    onChange={(e) =>
+                      setRequisitionType(
+                        e.target.value as (typeof REQUISITION_TYPES)[number]
+                      )
+                    }
+                    className={inputClassName}
+                  >
+                    {REQUISITION_TYPES.map((type) => (
+                      <option key={type} value={type}>
+                        {type}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label htmlFor="reqMobileNumber" className={labelClassName}>
+                    Mobile Number
+                  </label>
+                  <input
+                    id="reqMobileNumber"
+                    type="tel"
+                    value={reqMobileNumber}
+                    onChange={(e) => setReqMobileNumber(e.target.value)}
+                    className={`${inputClassName} tabular-nums`}
+                  />
+                </div>
+              </div>
+
+              {/* Row 3: From Date & To Date */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="reqFromDate" className={labelClassName}>
+                    From Date
+                  </label>
+                  <input
+                    id="reqFromDate"
+                    type="date"
+                    value={reqFromDateIso}
+                    onChange={(e) => setReqFromDateIso(e.target.value)}
+                    className={`${inputClassName} tabular-nums`}
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="reqToDate" className={labelClassName}>
+                    To Date
+                  </label>
+                  <input
+                    id="reqToDate"
+                    type="date"
+                    value={reqToDateIso}
+                    onChange={(e) => setReqToDateIso(e.target.value)}
+                    className={`${inputClassName} tabular-nums`}
+                  />
+                </div>
+              </div>
+
+              {/* Primary Button */}
+              <div className="pt-2">
+                <button
+                  type="submit"
+                  className="w-full sm:w-auto px-6 py-2.5 text-sm font-medium text-white bg-[#0F172A] rounded hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-[#0F172A] focus:ring-offset-2 cursor-pointer"
+                >
+                  Generate Requisition
+                </button>
+              </div>
+            </form>
+          )}
         </div>
       </main>
     </div>

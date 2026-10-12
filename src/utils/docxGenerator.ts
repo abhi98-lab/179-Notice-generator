@@ -537,3 +537,185 @@ export function generateNoticeDocx(
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   });
 }
+
+export const REQUISITION_PLACEHOLDERS = [
+  'GDE_NO',
+  'GDE_DATE',
+  'NCMEC_TIPLINE_NO',
+  'REQUISITION_TYPE',
+  'MOBILE_NUMBER',
+  'FROM_DATE',
+  'TO_DATE',
+  'IO_NAME',
+  'IO_MOBILE',
+] as const;
+
+export type RequisitionPlaceholderKey = (typeof REQUISITION_PLACEHOLDERS)[number];
+
+export type RequisitionPlaceholderValues = Record<RequisitionPlaceholderKey, string>;
+
+const REQUISITION_PLACEHOLDER_REGEX = new RegExp(
+  `\\{\\{(${REQUISITION_PLACEHOLDERS.join('|')})\\}\\}`,
+  'g'
+);
+
+/**
+ * Replaces ONLY exact {{PLACEHOLDER}} tokens inside the NCMEC CDR / CAF / SDR
+ * DOCX master without altering any tables, row heights, fonts, recommendation boxes,
+ * Final Order box, Gist, or page layout.
+ */
+function replaceRequisitionPlaceholdersInXmlDom(
+  xmlString: string,
+  values: RequisitionPlaceholderValues
+): string {
+  const parser = new DOMParser();
+  const xmlDoc = parser.parseFromString(xmlString, 'application/xml');
+
+  const parseError = xmlDoc.getElementsByTagName('parsererror');
+  if (parseError.length > 0) {
+    return xmlString.replace(
+      REQUISITION_PLACEHOLDER_REGEX,
+      (_, key: RequisitionPlaceholderKey) => escapeXml(values[key] ?? '')
+    );
+  }
+
+  const paragraphs = Array.from(xmlDoc.getElementsByTagName('w:p'));
+
+  for (const p of paragraphs) {
+    const tNodes = Array.from(p.getElementsByTagName('w:t'));
+    if (tNodes.length === 0) continue;
+
+    for (const node of tNodes) {
+      setXmlSpacePreserve(node);
+    }
+
+    let fullText = '';
+    const nodeRanges: { node: Element; start: number; end: number; text: string }[] = [];
+
+    for (const node of tNodes) {
+      const text = node.textContent || '';
+      const start = fullText.length;
+      fullText += text;
+      nodeRanges.push({
+        node,
+        start,
+        end: fullText.length,
+        text,
+      });
+    }
+
+    if (!fullText.includes('{{')) continue;
+
+    const matches: {
+      key: RequisitionPlaceholderKey;
+      start: number;
+      end: number;
+      replacement: string;
+    }[] = [];
+    let match: RegExpExecArray | null;
+    REQUISITION_PLACEHOLDER_REGEX.lastIndex = 0;
+
+    while ((match = REQUISITION_PLACEHOLDER_REGEX.exec(fullText)) !== null) {
+      const key = match[1] as RequisitionPlaceholderKey;
+      const replacement = values[key] ?? '';
+      matches.push({
+        key,
+        start: match.index,
+        end: match.index + match[0].length,
+        replacement,
+      });
+    }
+
+    if (matches.length === 0) continue;
+
+    // Apply matches in reverse order so character offsets remain valid
+    for (let i = matches.length - 1; i >= 0; i--) {
+      const { start, end, replacement } = matches[i];
+
+      for (let nIdx = 0; nIdx < nodeRanges.length; nIdx++) {
+        const range = nodeRanges[nIdx];
+        if (range.end <= start || range.start >= end) {
+          continue;
+        }
+
+        const localStart = Math.max(0, start - range.start);
+        const localEnd = Math.min(range.text.length, end - range.start);
+
+        const isFirstOverlappingNode = range.start <= start && range.end > start;
+
+        if (isFirstOverlappingNode) {
+          range.text =
+            range.text.slice(0, localStart) +
+            replacement +
+            range.text.slice(localEnd);
+        } else {
+          range.text =
+            range.text.slice(0, localStart) +
+            range.text.slice(localEnd);
+        }
+      }
+
+      // Recalculate ranges in case multiple placeholders share the same paragraph
+      let updatedFullText = '';
+      for (const range of nodeRanges) {
+        range.start = updatedFullText.length;
+        updatedFullText += range.text;
+        range.end = updatedFullText.length;
+      }
+    }
+
+    for (const range of nodeRanges) {
+      if ((range.node.textContent || '') !== range.text) {
+        setNodeTextWithLineBreaks(xmlDoc, range.node, range.text);
+      } else {
+        setXmlSpacePreserve(range.node);
+      }
+    }
+  }
+
+  const serializer = new XMLSerializer();
+  return serializer.serializeToString(xmlDoc);
+}
+
+export function generateRequisitionDocx(
+  masterBuffer: ArrayBuffer,
+  values: RequisitionPlaceholderValues
+): Blob {
+  // Always use a fresh copy of the master buffer
+  const freshBuffer = masterBuffer.slice(0);
+  const zip = new PizZip(freshBuffer);
+
+  const xmlFiles = Object.keys(zip.files).filter(
+    (fileName) =>
+      fileName === 'word/document.xml' ||
+      /^word\/header\d*\.xml$/.test(fileName) ||
+      /^word\/footer\d*\.xml$/.test(fileName)
+  );
+
+  const unresolvedSet = new Set<string>();
+
+  for (const fileName of xmlFiles) {
+    const file = zip.file(fileName);
+    if (!file) continue;
+    const xmlContent = file.asText();
+    const updatedXml = replaceRequisitionPlaceholdersInXmlDom(xmlContent, values);
+
+    for (const token of findUnresolvedPlaceholders(updatedXml)) {
+      unresolvedSet.add(token);
+    }
+
+    zip.file(fileName, updatedXml);
+  }
+
+  if (unresolvedSet.size > 0) {
+    throw new Error(
+      `Unresolved placeholders found in document: ${Array.from(unresolvedSet).join(', ')}`
+    );
+  }
+
+  return zip.generate({
+    type: 'blob',
+    mimeType:
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  });
+}

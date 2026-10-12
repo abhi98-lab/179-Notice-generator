@@ -2,6 +2,7 @@ const DB_NAME = '179_Notice_Generator_DB';
 const DB_VERSION = 1;
 const STORE_NAME = 'master_template';
 const TEMPLATE_KEY = '179_bnss_ncmec_notice_master';
+const CDR_TEMPLATE_KEY = 'ncmec_cdr_caf_sdr_master';
 const IO_DETAILS_KEY = '179_bnss_ncmec_io_details';
 
 export interface StoredTemplate {
@@ -62,6 +63,41 @@ export async function getMasterTemplate(): Promise<StoredTemplate | null> {
     const tx = db.transaction(STORE_NAME, 'readonly');
     const store = tx.objectStore(STORE_NAME);
     const req = store.get(TEMPLATE_KEY);
+
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+    tx.oncomplete = () => db.close();
+  });
+}
+
+export async function saveCdrMasterTemplate(file: File): Promise<StoredTemplate> {
+  const buffer = await file.arrayBuffer();
+  const db = await openDB();
+  const record: StoredTemplate = {
+    id: CDR_TEMPLATE_KEY,
+    fileName: file.name,
+    updatedAt: Date.now(),
+    buffer,
+  };
+
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    const req = store.put(record);
+
+    req.onsuccess = () => resolve(record);
+    req.onerror = () => reject(req.error);
+    tx.oncomplete = () => db.close();
+  });
+}
+
+export async function getCdrMasterTemplate(): Promise<StoredTemplate | null> {
+  const db = await openDB();
+
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const store = tx.objectStore(STORE_NAME);
+    const req = store.get(CDR_TEMPLATE_KEY);
 
     req.onsuccess = () => resolve(req.result || null);
     req.onerror = () => reject(req.error);
