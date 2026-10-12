@@ -1,0 +1,6 @@
+{
+  "name": "179 Notice Generator - Cyber Crime PS, Birbhum",
+  "description": "Minimal and professional 179 BNSS NCMEC Notice Generator for Cyber Crime PS, Birbhum.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
